@@ -1,0 +1,16 @@
+services:
+  assistant-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: assistant-backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - /app/venv  # Prevents mounting host venv over container dependencies
+    env_file:
+      - .env
+    environment:
+      - PORT=8080
+    restart: always
