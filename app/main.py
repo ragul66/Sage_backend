@@ -1,0 +1,276 @@
+import logging
+import socket
+import json
+import asyncio
+from typing import Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from google import genai
+from google.genai import types
+
+from app.core.config import settings
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+def get_local_ip() -> str:
+    """
+    Utility to discover the laptop's local network IP address on the active interface.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.1)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except Exception:
+        return "127.0.0.1"
+
+local_lan_ip = get_local_ip()
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    description="Backend for SageAssistant Voice Agent integrated with Retell AI Custom LLM WebSocket protocol",
+    version="1.0.0"
+)
+
+# CORS Middleware for physical/simulator mobile devices on the local Wi-Fi
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Global Google Gen AI Client
+ai_client: Optional[genai.Client] = None
+
+@app.on_event("startup")
+async def startup_event():
+    global ai_client
+    if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY != "your_gemini_api_key_here":
+        try:
+            ai_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            logger.info("Google Gen AI client initialized successfully with gemini-2.5-flash.")
+        except Exception as e:
+            logger.error(f"Error configuring Google Gen AI client: {e}")
+    else:
+        logger.warning("GEMINI_API_KEY is not configured or set to default template value. Running in DEMO mode.")
+
+    banner = f"""
+================================================================================
+  SAGEASSISTANT / RETELL INTERMEDIARY BACKEND STARTED SUCCESSFULLY!
+================================================================================
+  Local API Server:       http://localhost:{settings.PORT}
+  Mobile Connection URL:  http://{local_lan_ip}:{settings.PORT}
+  Retell WebSocket URL:   ws://{local_lan_ip}:{settings.PORT}/llm-websocket/{{call_id}}
+================================================================================
+    """
+    print(banner)
+
+# --- WebSocket Endpoint for Retell AI Custom LLM Protocol ---
+
+@app.websocket("/llm-websocket/{call_id}")
+async def llm_websocket(websocket: WebSocket, call_id: str):
+    await websocket.accept()
+    logger.info(f"Retell WebSocket connection accepted for call_id: {call_id}")
+
+    # 1. Instantly send a Retell-compliant initial greeting JSON payload
+    greeting_payload = {
+        "response_type": "response",
+        "response_id": 0,
+        "content": "Hi! Thanks for calling. I'm an AI assistant. I can take a message and pass it along immediately. Who do I have the pleasure of speaking with?",
+        "content_complete": True,
+        "end_of_call": False
+    }
+
+    try:
+        await websocket.send_json(greeting_payload)
+        logger.info(f"Initial greeting sent successfully for call_id: {call_id}")
+    except Exception as e:
+        logger.error(f"Error sending initial greeting: {e}")
+        await websocket.close()
+        return
+
+    # Check if Gemini AI Client is initialized
+    if not ai_client:
+        logger.error("Cannot proceed with chat session: Gemini client is not initialized.")
+        try:
+            await websocket.send_json({
+                "response_type": "response",
+                "response_id": 0,
+                "content": "Hello. I'm currently experiencing system issues. Please try calling back later.",
+                "content_complete": True,
+                "end_of_call": True
+            })
+        except Exception:
+            pass
+        await websocket.close()
+        return
+
+    # 2. Chat Management & Gemini Integration: Initialize multi-turn chat session
+    try:
+        system_instruction = (
+            "You are Neary AI Assistant, a professional mobile answering machine. "
+            "Keep your responses short, concise, and optimized for phone speech. "
+            "Never use markdown, bolding, asterisks, or bullet points in your output. "
+            "If the user is saying goodbye, thank you, or indicates they are done leaving their message, "
+            "politely say goodbye or wish them a great day so the call can end."
+        )
+        chat = ai_client.chats.create(
+            model=settings.GEMINI_MODEL,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.7
+            )
+        )
+        logger.info(f"Multi-turn Gemini chat session established for call_id: {call_id}")
+    except Exception as e:
+        logger.error(f"Failed to create Gemini chat session: {e}")
+        await websocket.close()
+        return
+
+    # 3. Retell Protocol Event Loop
+    try:
+        while True:
+            # Wait for incoming messages
+            message_text = await websocket.receive_text()
+            logger.info(f"Received data from Retell for call_id {call_id}: {message_text[:100]}...")
+
+            try:
+                request = json.loads(message_text)
+            except Exception as e:
+                logger.error(f"Invalid JSON payload from Retell: {e}")
+                continue
+
+            interaction_type = request.get("interaction_type")
+
+            if interaction_type == "response_required":
+                response_id = request.get("response_id", 0)
+                transcript = request.get("transcript", [])
+
+                if not transcript:
+                    logger.warning("response_required event received, but transcript list is empty.")
+                    continue
+
+                # Extract latest user message
+                user_message = transcript[-1].get("content", "").strip()
+                logger.info(f"User transcript: '{user_message}'")
+
+                # Send message to Gemini in a separate thread to prevent blocking
+                try:
+                    response = await asyncio.to_thread(chat.send_message, user_message)
+                    gemini_response_text = response.text.strip()
+                    logger.info(f"Gemini reply: '{gemini_response_text}'")
+                except Exception as e:
+                    logger.error(f"Error calling Gemini SDK send_message: {e}")
+                    gemini_response_text = "I'm sorry, I'm having trouble understanding you right now. Could you say that again?"
+
+                # Case-insensitive end-of-call detection
+                text_lower = gemini_response_text.lower()
+                end_of_call = "goodbye" in text_lower or "have a great day" in text_lower
+
+                # Send back the exact payload format
+                response_payload = {
+                    "response_type": "response",
+                    "response_id": response_id,
+                    "content": gemini_response_text,
+                    "content_complete": True,
+                    "end_of_call": end_of_call
+                }
+
+                await websocket.send_json(response_payload)
+                logger.info(f"Sent reply to Retell (response_id={response_id}, end_of_call={end_of_call})")
+
+                if end_of_call:
+                    logger.info(f"Terminating WebSocket call session {call_id} gracefully based on goodbye.")
+                    break
+
+            elif interaction_type == "ping":
+                await websocket.send_json({"response_type": "pong"})
+            else:
+                logger.info(f"Ignored non-actionable interaction: {interaction_type}")
+
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected by Retell for call_id: {call_id}")
+    except Exception as e:
+        logger.error(f"Error in Retell WebSocket event loop for call_id {call_id}: {e}", exc_info=True)
+    finally:
+        logger.info(f"Closing WebSocket for call_id: {call_id}")
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+# --- Mobile App SMS Integration Endpoint ---
+
+class GenerateTextRequest(BaseModel):
+    prompt: str = Field(..., description="The prompt or SMS text received from the mobile app.")
+
+class GenerateResponse(BaseModel):
+    text: str = Field(..., description="SMS text response generated by the agent.")
+    audio: str = Field("", description="Base64 encoded audio placeholder.")
+    format: str = Field("mp3", description="Audio format.")
+
+@app.post("/api/generate", response_model=GenerateResponse, summary="SMS AI reply endpoint for mobile application")
+async def generate_from_text(request: GenerateTextRequest):
+    """
+    HTTP route targeted by the mobile app's SmsReplyReceiver and SageAIHandlerService.
+    Ensures backward compatibility by generating text with the new SDK and returning the expected JSON structure.
+    """
+    logger.info(f"Received SMS request: '{request.prompt[:50]}'")
+    prompt = request.prompt
+
+    if prompt == "INITIAL_GREETING":
+        prompt = (
+            "Generate a short, friendly SMS greeting as Neary AI Assistant. "
+            "Tell the caller that the person they tried to call is busy right now, and that you can help via text. "
+            "Ask who they are and how you can help. Keep it to 2-3 sentences max. Write as a text message, no emojis."
+        )
+
+    if not ai_client:
+        demo_greeting = (
+            "Hi! This is Neary AI Assistant. The person you called is busy right now. "
+            "I can take a message and pass it along immediately. Who do I have the pleasure of speaking with?"
+        )
+        return GenerateResponse(text=demo_greeting)
+
+    try:
+        system_instruction = (
+            "You are Neary AI Assistant, a professional mobile answering machine. "
+            "Keep your responses short, concise, and optimized for phone/SMS speech. "
+            "Never use markdown, bolding, asterisks, or bullet points in your output."
+        )
+        
+        response = await asyncio.to_thread(
+            ai_client.models.generate_content,
+            model=settings.GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.7
+            )
+        )
+        response_text = response.text.strip()
+        return GenerateResponse(text=response_text)
+    except Exception as e:
+        logger.error(f"Error in generate_from_text: {e}")
+        fallback_msg = "Hello, the user is currently busy. Please send your message, and I'll forward it to them."
+        return GenerateResponse(text=fallback_msg)
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    return {
+        "status": "healthy",
+        "project": settings.PROJECT_NAME,
+        "local_ip": local_lan_ip,
+        "gemini_configured": ai_client is not None
+    }

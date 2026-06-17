@@ -1,0 +1,21 @@
+# Python Cache and Byte-compiled files
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments and Virtual Envs
+.env
+.venv
+env/
+venv/
+ENV/
+*.bak
+*.tmp
+
+# IDE / System files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
