@@ -128,7 +128,9 @@ async def llm_websocket(websocket: WebSocket, call_id: str):
             "Keep your responses short, concise, and optimized for phone speech. "
             "Never use markdown, bolding, asterisks, or bullet points in your output. "
             "If the user is saying goodbye, thank you, or indicates they are done leaving their message, "
-            "politely say goodbye or wish them a great day so the call can end."
+            "politely say goodbye or wish them a great day so the call can end. "
+            "Always respond in English. Do not write responses in Tamil, Tamil script, or any other language, "
+            "even if the user writes in Tamil, Tanglish, or any other language."
         )
         chat = ai_client.chats.create(
             model=settings.GEMINI_MODEL,
@@ -242,7 +244,9 @@ async def generate_from_text(request: GenerateTextRequest):
     system_instruction = (
         "You are Neary AI Assistant, a professional mobile answering machine. "
         "Keep your responses short, concise, and optimized for phone/SMS speech. "
-        "Never use markdown, bolding, asterisks, or bullet points in your output."
+        "Never use markdown, bolding, asterisks, or bullet points in your output. "
+        "Always respond in English. Do not write responses in Tamil, Tamil script, or any other language, "
+        "even if the user writes in Tamil, Tanglish, or any other language."
     )
 
     if not ai_client:
