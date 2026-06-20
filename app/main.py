@@ -123,14 +123,17 @@ async def llm_websocket(websocket: WebSocket, call_id: str):
     # 2. Chat Management & Gemini Integration: Initialize multi-turn chat session
     try:
         system_instruction = (
-            "You are Spidey AI Assistant, a professional mobile answering machine. "
-            "Your name is Spidey. "
+            "You are Sage AI Assistant, a professional mobile answering machine. "
+            "Your name is Sage. "
+            "You are helping take a message for the owner because they are currently busy or unavailable. "
             "Keep your responses short, concise, and optimized for phone speech. "
             "Never use markdown, bolding, asterisks, or bullet points in your output. "
             "If the user is saying goodbye, thank you, or indicates they are done leaving their message, "
             "politely say goodbye or wish them a great day so the call can end. "
             "Always respond in English. Do not write responses in Tamil, Tamil script, or any other language, "
-            "even if the user writes in Tamil, Tanglish, or any other language."
+            "even if the user writes in Tamil, Tanglish, or any other language. "
+            "If the user replies with a simple confirmation like 'yes', 'sure', 'ok', or 'okay' indicating they want to leave a message, "
+            "politely ask them what message they would like to leave."
         )
         chat = ai_client.chats.create(
             model=settings.GEMINI_MODEL,
@@ -242,18 +245,21 @@ async def generate_from_text(request: GenerateTextRequest):
     custom_greeting = request.custom_greeting
 
     system_instruction = (
-        "You are Neary AI Assistant, a professional mobile answering machine. "
-        "Keep your responses short, concise, and optimized for phone/SMS speech. "
+        "You are Sage AI Assistant, a professional mobile answering machine. "
+        "Your name is Sage. "
+        "You are helping take a message for the owner because they are currently busy or unavailable. "
+        "Keep your responses short, concise, and optimized for text/SMS conversation. "
         "Never use markdown, bolding, asterisks, or bullet points in your output. "
         "Always respond in English. Do not write responses in Tamil, Tamil script, or any other language, "
-        "even if the user writes in Tamil, Tanglish, or any other language."
+        "even if the user writes in Tamil, Tanglish, or any other language. "
+        "If the user replies with a simple confirmation like 'yes', 'sure', 'ok', or 'okay' indicating they want to leave a message, "
+        "politely ask them what message they would like to leave."
     )
 
     if not ai_client:
         demo_greeting = (
             custom_greeting or 
-            "Hi! This is Neary AI Assistant. The person you called is busy right now. "
-            "I can take a message and pass it along immediately. Who do I have the pleasure of speaking with?"
+            "Hi! I'm currently unavailable. This is Sage, my AI assistant. I can help take a message — please reply here."
         )
         return GenerateResponse(text=demo_greeting)
 
@@ -266,7 +272,7 @@ async def generate_from_text(request: GenerateTextRequest):
             else:
                 # Generate initial greeting using Gemini
                 gen_prompt = (
-                    "Generate a short, friendly SMS greeting as Neary AI Assistant. "
+                    "Generate a short, friendly SMS greeting as Sage AI Assistant. "
                     "Tell the caller that the person they tried to call is busy right now, and that you can help via text. "
                     "Ask who they are and how you can help. Keep it to 2-3 sentences max. Write as a text message, no emojis."
                 )
@@ -313,9 +319,24 @@ async def generate_from_text(request: GenerateTextRequest):
                 reply_text = response.text.strip()
             else:
                 # Fallback: No session or server restarted, create new and process message
-                logger.info(f"No existing SMS chat session for phone: {phone_number}. Creating new session.")
+                logger.info(f"No existing SMS chat session for phone: {phone_number}. Creating new session and recovering context.")
+                
+                # Reconstruct the initial greeting as context for history
+                if custom_greeting and custom_greeting.strip():
+                    initial_msg = custom_greeting.strip()
+                else:
+                    initial_msg = "Hi! I'm currently unavailable. This is Sage, my AI assistant. I can help take a message — please reply here."
+                
+                history = [
+                    types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text=initial_msg)]
+                    )
+                ]
+                
                 chat = ai_client.chats.create(
                     model=settings.GEMINI_MODEL,
+                    history=history,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
                         temperature=0.7
