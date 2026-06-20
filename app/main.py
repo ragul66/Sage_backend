@@ -80,6 +80,13 @@ async def startup_event():
     """
     print(banner)
 
+@app.get("/", summary="Root health check endpoint")
+async def root():
+    return {
+        "status": "healthy",
+        "message": "SageAssistant API is running. Direct mobile app requests to /api/generate or health checks to /health."
+    }
+
 # --- WebSocket Endpoint for Retell AI Custom LLM Protocol ---
 
 @app.websocket("/llm-websocket/{call_id}")
